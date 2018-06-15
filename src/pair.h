@@ -131,6 +131,8 @@ class Pair : protected Pointers {
   void ev_tally_xyz(int, int, int, int, double, double,
                     double, double, double, double, double, double);
 
+  void ev_tally_manybody(int, int, int, int, double, double, double *, double *);
+
   // general child-class methods
 
   virtual void compute(int, int) = 0;
@@ -185,10 +187,13 @@ class Pair : protected Pointers {
 
  protected:
   int num_tally_compute;
+  int *list_tally_type;
   class Compute **list_tally_compute;
  public:
-  virtual void add_tally_callback(class Compute *);
+  virtual void add_tally_callback(class Compute *, int tally_type = 0);
   virtual void del_tally_callback(class Compute *);
+  const int TALLYTYPE_EV_TALLY = 0;
+  const int TALLYTYPE_EV_TALLY_MANYBODY = 1;
 
  protected:
   int instance_me;        // which Pair class instantiation I am

@@ -138,10 +138,13 @@ class Compute : protected Pointers {
   virtual double memory_usage() {return 0.0;}
 
   virtual void pair_setup_callback(int, int) {}
+  // TALLY_EV_TALLY method callback
   virtual void pair_tally_callback(int, int, int, int,
                                    double, double, double,
                                    double, double, double) {}
-
+  // TALLY_EV_TALLY_MANYBODY method callback
+  virtual void pair_tally_callback(int, int, int, int, double, double,
+                                   double *, double *) {}
  protected:
   int instance_me;             // which Compute class instantiation I am
 

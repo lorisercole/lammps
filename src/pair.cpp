@@ -99,6 +99,7 @@ Pair::Pair(LAMMPS *lmp) : Pointers(lmp)
 
   num_tally_compute = 0;
   list_tally_compute = NULL;
+  list_tally_type = NULL;
 
   // KOKKOS per-fix data masks
 
@@ -116,6 +117,8 @@ Pair::~Pair()
   num_tally_compute = 0;
   memory->sfree((void *) list_tally_compute);
   list_tally_compute = NULL;
+  memory->sfree((void *) list_tally_type);
+  list_tally_type = NULL;
 
   if (copymode) return;
 
@@ -701,10 +704,15 @@ void Pair::read_restart(FILE *)
 /* -------------------------------------------------------------------
    register a callback to a compute, so it can compute and accumulate
    additional properties during the pair computation from within
-   Pair::ev_tally(). ensure each compute instance is registered only once
+   Pair::ev_tally(). 
+   Each compute instance can have more than one tally callbacks, as far as they
+   are of different types (e.g. one ev_tally() and one ev_tally_manybody()).
+   The supported tally types are:
+      TALLYTYPE_EV_TALLY (0)         :  Pair::ev_tally()
+      TALLYTYPE_EV_TALLY_MANYBODY (1):  Pair::ev_tally_manybody()
 ---------------------------------------------------------------------- */
 
-void Pair::add_tally_callback(Compute *ptr)
+void Pair::add_tally_callback(Compute *ptr, int tally_type)
 {
   if (lmp->kokkos)
     error->all(FLERR,"Cannot yet use compute tally with Kokkos");
@@ -712,7 +720,7 @@ void Pair::add_tally_callback(Compute *ptr)
   int i,found=-1;
 
   for (i=0; i < num_tally_compute; ++i) {
-    if (list_tally_compute[i] == ptr)
+    if (list_tally_compute[i] == ptr && list_tally_type[i] == tally_type)
       found = i;
   }
 
@@ -724,6 +732,11 @@ void Pair::add_tally_callback(Compute *ptr)
                                "pair:list_tally_compute");
     list_tally_compute = (Compute **) p;
     list_tally_compute[num_tally_compute-1] = ptr;
+    void *pp = memory->srealloc((void *)list_tally_type,
+                               sizeof(int) * num_tally_compute,
+                               "pair:list_tally_type");
+    list_tally_type = (int *) pp;
+    list_tally_type[num_tally_compute-1] = tally_type;
   }
 }
 
@@ -735,18 +748,21 @@ void Pair::del_tally_callback(Compute *ptr)
 {
   int i,found=-1;
 
-  for (i=0; i < num_tally_compute; ++i) {
-    if (list_tally_compute[i] == ptr)
-      found = i;
-  }
-
-  if (found < 0)
-    return;
-
-  // compact the list of active computes
-  --num_tally_compute;
-  for (i=found; i < num_tally_compute; ++i) {
-    list_tally_compute[i] = list_tally_compute[i+1];
+  // delete all the callbacks corresponding to the compute
+  while (1) {
+    for (i=0; i < num_tally_compute; ++i) {
+      if (list_tally_compute[i] == ptr)
+        found = i;
+    }
+  
+    if (found < 0)
+      return;
+  
+    // compact the list of active computes
+    --num_tally_compute;
+    for (i=found; i < num_tally_compute; ++i) {
+      list_tally_compute[i] = list_tally_compute[i+1];
+    }
   }
 }
 
@@ -946,9 +962,12 @@ void Pair::ev_tally(int i, int j, int nlocal, int newton_pair,
 
   if (num_tally_compute > 0) {
     for (int k=0; k < num_tally_compute; ++k) {
-      Compute *c = list_tally_compute[k];
-      c->pair_tally_callback(i, j, nlocal, newton_pair,
-                             evdwl, ecoul, fpair, delx, dely, delz);
+      // if tally_type is ev_tally()
+      if (list_tally_type[k] == TALLYTYPE_EV_TALLY) {
+        Compute *c = list_tally_compute[k];
+        c->pair_tally_callback(i, j, nlocal, newton_pair,
+                               evdwl, ecoul, fpair, delx, dely, delz);
+      }
     }
   }
 }
@@ -1329,6 +1348,79 @@ void Pair::ev_tally_tip4p(int key, int *list, double *v,
     }
   }
 }
+
+/* ----------------------------------------------------------------------
+   tally eng_vdwl and virial into global and per-atom accumulators
+   use this version for many-body potentials like Tersoff
+   assumes that netwon_pair is true.
+   (with some edits it can probably be substituted by ev_tally_xyz)
+------------------------------------------------------------------------- */
+
+void Pair::ev_tally_manybody(int i, int j, int nlocal, int newton, double evdwl,
+                             double ecoul, double *fi, double *deli)
+{
+  double epairhalf,v[6];
+
+  if (eflag_either) {
+    if (eflag_global) {
+      eng_vdwl += evdwl;
+      eng_coul += ecoul;
+    }
+    if (eflag_atom) {
+      epairhalf = 0.5 * (evdwl + ecoul);
+      eatom[i] += epairhalf;
+      eatom[j] += epairhalf;
+    }
+  }
+
+  if (vflag_either) {
+    v[0] = deli[0]*fi[0];
+    v[1] = deli[1]*fi[1];
+    v[2] = deli[2]*fi[2];
+    v[3] = deli[0]*fi[1];
+    v[4] = deli[0]*fi[2];
+    v[5] = deli[1]*fi[2];
+
+    if (vflag_global) {
+      virial[0] += v[0];
+      virial[1] += v[1];
+      virial[2] += v[2];
+      virial[3] += v[3];
+      virial[4] += v[4];
+      virial[5] += v[5];
+    }
+
+    if (vflag_atom) {
+      if (newton || i < nlocal) {
+        vatom[i][0] += 0.5*v[0];
+        vatom[i][1] += 0.5*v[1];
+        vatom[i][2] += 0.5*v[2];
+        vatom[i][3] += 0.5*v[3];
+        vatom[i][4] += 0.5*v[4];
+        vatom[i][5] += 0.5*v[5];
+      }
+      if (newton || j < nlocal) {
+        vatom[j][0] += 0.5*v[0];
+        vatom[j][1] += 0.5*v[1];
+        vatom[j][2] += 0.5*v[2];
+        vatom[j][3] += 0.5*v[3];
+        vatom[j][4] += 0.5*v[4];
+        vatom[j][5] += 0.5*v[5];
+      }
+    }
+  }
+
+  if (num_tally_compute > 0) {
+    for (int k=0; k < num_tally_compute; ++k) {
+      // if tally_type is ev_tally_manybody()
+      if (list_tally_type[k] == TALLYTYPE_EV_TALLY_MANYBODY) {
+        Compute *c = list_tally_compute[k];
+        c->pair_tally_callback(i, j, nlocal, newton, evdwl, ecoul, fi, deli);
+      }
+    }
+  }
+}
+
 
 /* ----------------------------------------------------------------------
    tally virial into per-atom accumulators
